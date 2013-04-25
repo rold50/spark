@@ -1,6 +1,6 @@
 package spark.scheduler.cluster
 
-import java.io.{File, FileInputStream, FileOutputStream}
+import java.io.{File, FileInputStream, FileOutputStream, PrintWriter}
 
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable.ArrayBuffer
@@ -8,6 +8,7 @@ import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
 import scala.util.control.Breaks._
 import scala.xml._
+import scala.compat.Platform
 
 import spark.Logging
 
@@ -25,6 +26,9 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
   val poolNameToPool= new HashMap[String, Pool]
   var pools = new ArrayBuffer[Pool]
   
+  val poolNames = new ArrayBuffer[String]
+  val poolsForLogging = new ArrayBuffer[Pool]
+  
   loadPoolProperties()
   
   def loadPoolProperties() {
@@ -36,6 +40,8 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
       pools += pool
       poolNameToPool("default") = pool
       logInfo("Created a default pool with weight = 100")
+      poolsForLogging += pool
+      poolNames += "default"
     }
     else {
       val xml = XML.loadFile(file)
@@ -45,11 +51,15 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
           pools += pool
           poolNameToPool((poolNode \ "@name").text) = pool
           logInfo("Created pool "+ pool.name +"with weight = "+pool.weight)
+          poolsForLogging += pool
+          poolNames += ((poolNode \"@name").text)
         } else {
           val pool = new Pool((poolNode \ "@name").text,100)
           pools += pool
           poolNameToPool((poolNode \ "@name").text) = pool
           logInfo("Created pool "+ pool.name +"with weight = 100")
+          poolsForLogging += pool
+          poolNames += ((poolNode \"@name").text)
         }
       }
       if(!poolNameToPool.contains("default")) {
@@ -57,6 +67,8 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
         pools += pool
         poolNameToPool("default") = pool
         logInfo("Created a default pool with weight = 100")
+        poolsForLogging += pool
+        poolNames += "default"
       }
         
     }    
@@ -66,9 +78,15 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
     var poolName = "default"
     if(manager.taskSet.properties != null)  
       poolName = manager.taskSet.properties.getProperty("spark.scheduler.cluster.fair.pool","default")
-    if(poolNameToPool.contains(poolName))          
-      poolNameToPool(poolName).activeTaskSetsQueue += manager          
-    else
+    if(poolNameToPool.contains(poolName)) {           		
+      poolNameToPool(poolName).activeTaskSetsQueue += manager
+      if(poolName.contains("|")) {
+        val splits = poolName.split("\\|")
+        for(split <- splits) {
+          poolNameToPool(split).isDisabled = true
+        }
+      }      
+    } else
       poolNameToPool("default").activeTaskSetsQueue += manager
     logInfo("Added task set " + manager.taskSet.id + " tasks to pool "+poolName)
         
@@ -78,9 +96,15 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
     var poolName = "default"
     if(manager.taskSet.properties != null)  
       poolName = manager.taskSet.properties.getProperty("spark.scheduler.cluster.fair.pool","default")
-    if(poolNameToPool.contains(poolName))
+    if(poolNameToPool.contains(poolName)) {
       poolNameToPool(poolName).activeTaskSetsQueue -= manager
-    else
+      if(poolName.contains("|") && poolNameToPool(poolName).activeTaskSetsQueue.size <= 0) {        
+        val splits = poolName.split("\\|")
+        for(split <- splits) {
+          poolNameToPool(split).isDisabled = false
+        }
+      }      
+    } else
       poolNameToPool("default").activeTaskSetsQueue -= manager      
   }
   
@@ -107,8 +131,8 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
    * (pools number running tast / pool's weight)
    */
   def poolFairCompFn(pool1: Pool, pool2: Pool): Boolean = {    
-    val tasksToWeightRatio1 = pool1.numRunningTasks.toDouble / pool1.weight.toDouble
-    val tasksToWeightRatio2 = pool2.numRunningTasks.toDouble / pool2.weight.toDouble
+    val tasksToWeightRatio1 = if (!pool1.isDisabled){ pool1.numRunningTasks.toDouble / pool1.weight.toDouble } else { Double.MaxValue } 
+    val tasksToWeightRatio2 = if (!pool2.isDisabled){ pool2.numRunningTasks.toDouble / pool2.weight.toDouble } else { Double.MaxValue }
     var res = Math.signum(tasksToWeightRatio1 - tasksToWeightRatio2)
     if (res == 0) {
       //Jobs are tied in fairness ratio. We break the tie by name
@@ -171,6 +195,36 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
     }
     return shouldRevive
   }
+  
+  val logFile = System.getProperty("spark.fairscheduler.fairness.logfile","unspecified")
+  
+  startLogging()
+  
+  def startLogging() {
+    if(logFile != "unspecified") {
+      val t = new Thread(new Runnable {
+        def run() {
+          val file = new File(logFile)
+          val writer = new PrintWriter(new FileOutputStream(file), true)
+          writer.print("time")
+          for(name <- poolNames)
+            writer.print(","+name)
+          writer.println()
+          val startTime: Long = Platform.currentTime
+          while(true) {
+            writer.print((Platform.currentTime - startTime))
+            for(pool <- poolsForLogging)
+              writer.print(","+pool.numRunningTasks)
+            writer.println                
+            Thread.sleep(1000)
+          }          
+        }
+      })
+      t.setDaemon(true)
+      t.start
+    }
+  }
+  
 }
 
 /**
@@ -180,4 +234,5 @@ class Pool(val name: String, val weight: Int)
 {
   var activeTaskSetsQueue = new ArrayBuffer[TaskSetManager]
   var numRunningTasks: Int = 0 
+  var isDisabled: Boolean = false
 }
