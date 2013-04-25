@@ -6,6 +6,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable.HashMap
 import scala.collection.mutable.HashSet
+import scala.collection.immutable.TreeSet
 import scala.util.control.Breaks._
 import scala.xml._
 import scala.compat.Platform
@@ -24,7 +25,7 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
   
   val schedulerAllocFile = System.getProperty("spark.fairscheduler.allocation.file","unspecified")  
   val poolNameToPool= new HashMap[String, Pool]
-  var pools = new ArrayBuffer[Pool]
+  val pools = new ArrayBuffer[Pool]
   
   val poolNames = new ArrayBuffer[String]
   val poolsForLogging = new ArrayBuffer[Pool]
@@ -62,6 +63,10 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
           poolNames += ((poolNode \"@name").text)
         }
       }
+      val listOfPools = new ArrayBuffer[String]
+      listOfPools.appendAll(poolNames)
+      loadCombinations(listOfPools)
+      
       if(!poolNameToPool.contains("default")) {
         val pool = new Pool("default", 100)
         pools += pool
@@ -72,6 +77,67 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
       }
         
     }    
+  }
+
+  /**
+   * A Utility function that generates combinations of the pools 
+   * and load it into the "list of pools" with weight = the sum of the pools we combined it from
+   */
+  def loadCombinations(listOfPools: ArrayBuffer[String]) {
+    val listCnt = listOfPools.size
+    val power = Math.pow(2, listCnt).toInt
+    val treeSetOrdering = new Ordering[TreeSet[Int]] {
+      def compare(t1: TreeSet[Int], t2: TreeSet[Int]): Int = {
+        if(t1.size < t2.size) {
+          return -1
+        } else if(t1.size > t2.size) {
+          return 1
+        } else {
+          val t1Iterator = t1.iterator
+          val t2Iterator = t2.iterator          
+          while(t1Iterator.hasNext) {
+            val t1Item = t1Iterator.next
+            val t2Item = t2Iterator.next
+            if(t1Item < t2Item) {
+              return -1
+            } else if(t1Item > t2Item) {
+              return 1
+            }  
+          }
+          return 0
+        }
+      }
+    }        
+    var combinationsSet = new TreeSet[TreeSet[Int]]()(treeSetOrdering)
+    for(outer <- 1 until power ) {
+      var member = new TreeSet[Int]
+      for(inner <- 1 until listCnt+1) {
+        val pow = Math.pow(2,inner - 1).toInt
+        if((outer & pow) != 0) {
+          member += (inner - 1)         
+          if(member.size > 1) {
+            combinationsSet += member
+          }
+        }
+      }
+    }
+    for(currComb <- combinationsSet) {
+      var combPoolName = ""
+      var delim = ""
+      var weight = 0  
+      for(indx <- currComb) {
+        val poolName = listOfPools(indx)
+        combPoolName += delim+poolName
+        weight = weight + poolNameToPool(poolName).weight
+        delim = "|"
+      }
+      val pool = new Pool(combPoolName,weight)
+      pools += pool
+      poolNameToPool(combPoolName) = pool
+      logInfo("Created pool "+ pool.name +"with weight = "+weight)
+      poolsForLogging += pool
+      poolNames += combPoolName
+    }            
   }
   
   override def addTaskSetManager(manager: TaskSetManager) {
@@ -110,12 +176,22 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
   
   override def taskFinished(manager: TaskSetManager) {
     var poolName = "default"
-    if(manager.taskSet.properties != null)  
+    var anycached = "false"
+    if(manager.taskSet.properties != null) {  
       poolName = manager.taskSet.properties.getProperty("spark.scheduler.cluster.fair.pool","default")
-    if(poolNameToPool.contains(poolName))
+      anycached = manager.taskSet.properties.getProperty("spark.stage.anycached")
+    }
+    if(poolNameToPool.contains(poolName)) {
       poolNameToPool(poolName).numRunningTasks -= 1
-    else
-      poolNameToPool("default").numRunningTasks -= 1      
+      if(anycached == "true") {
+        poolNameToPool(poolName).numRunningTasksUsingCache -= 1
+      }
+    } else {
+      poolNameToPool("default").numRunningTasks -= 1
+      if(anycached == "true") {
+        poolNameToPool(poolName).numRunningTasksUsingCache -= 1
+      }
+    }
   }
   
   override def removeExecutor(executorId: String, host: String) {
@@ -168,6 +244,9 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
                       taskSetIds(i) += manager.taskSet.id
                       availableCpus(i) -= 1
                       pool.numRunningTasks += 1
+                      if(manager.taskSet.properties != null && manager.taskSet.properties.getProperty("spark.stage.anycached") == true) {
+                        pool.numRunningTasksUsingCache += 1
+                      }
                       launchedTask = true
                       logInfo("launched task for pool"+pool.name);
                       break
@@ -207,15 +286,24 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
           val file = new File(logFile)
           val writer = new PrintWriter(new FileOutputStream(file), true)
           writer.print("time")
-          for(name <- poolNames)
+          val file_mem = new File(logFile+"-MEMORY")
+          val writer_mem = new PrintWriter(new FileOutputStream(file_mem), true)          
+          for(name <- poolNames) {
             writer.print(","+name)
+            writer_mem.print(","+name)
+          }
           writer.println()
+          writer_mem.println()
           val startTime: Long = Platform.currentTime
           while(true) {
             writer.print((Platform.currentTime - startTime))
-            for(pool <- poolsForLogging)
+            writer_mem.print((Platform.currentTime - startTime))
+            for(pool <- poolsForLogging) {
               writer.print(","+pool.numRunningTasks)
-            writer.println                
+              writer_mem.print(","+pool.numRunningTasksUsingCache)
+            }
+            writer.println
+            writer_mem.println
             Thread.sleep(1000)
           }          
         }
@@ -233,6 +321,7 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
 class Pool(val name: String, val weight: Int)
 {
   var activeTaskSetsQueue = new ArrayBuffer[TaskSetManager]
-  var numRunningTasks: Int = 0 
+  var numRunningTasks: Int = 0
+  var numRunningTasksUsingCache: Int = 0
   var isDisabled: Boolean = false
 }

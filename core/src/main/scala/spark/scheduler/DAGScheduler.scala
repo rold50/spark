@@ -436,10 +436,15 @@ class DAGScheduler(
     val myPending = pendingTasks.getOrElseUpdate(stage, new HashSet)
     myPending.clear()
     var tasks = ArrayBuffer[Task[_]]()
+    //Keep track whether any stage is using a cached RDD
+    var isAnyCached = false
     if (stage.isShuffleMap) {
       for (p <- 0 until stage.numPartitions if stage.outputLocs(p) == Nil) {
         val locs = getPreferredLocs(stage.rdd, p)
         tasks += new ShuffleMapTask(stage.id, stage.rdd, stage.shuffleDep.get, p, locs)
+        if(getCacheLocs(stage.rdd)(p) != Nil) {
+          isAnyCached = true
+        }
       }
     } else {
       // This is a final stage; figure out its job's missing partitions
@@ -448,12 +453,20 @@ class DAGScheduler(
         val partition = job.partitions(id)
         val locs = getPreferredLocs(stage.rdd, partition)
         tasks += new ResultTask(stage.id, stage.rdd, job.func, partition, locs, id)
+        if(getCacheLocs(stage.rdd)(partition) != Nil) {
+          isAnyCached = true
+        }
       }
     }
     if (tasks.size > 0) {
       logInfo("Submitting " + tasks.size + " missing tasks from " + stage + " (" + stage.rdd + ")")
       myPending ++= tasks
       logDebug("New pending tasks: " + myPending)
+      if(isAnyCached) {
+        stage.properties.setProperty("spark.stage.anycached", "true")
+      } else {
+        stage.properties.setProperty("spark.stage.anycached", "false")
+      }
       taskSched.submitTasks(
         new TaskSet(tasks.toArray, stage.id, stage.newAttemptId(), stage.priority, stage.properties))
       if (!stage.submissionTime.isDefined) {
