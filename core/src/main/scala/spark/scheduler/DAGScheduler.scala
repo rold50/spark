@@ -462,10 +462,12 @@ class DAGScheduler(
       logInfo("Submitting " + tasks.size + " missing tasks from " + stage + " (" + stage.rdd + ")")
       myPending ++= tasks
       logDebug("New pending tasks: " + myPending)
-      if(isAnyCached) {
-        stage.properties.setProperty("spark.stage.anycached", "true")
-      } else {
-        stage.properties.setProperty("spark.stage.anycached", "false")
+      if(stage.properties != null) {
+        if(isAnyCached) {
+          stage.properties.setProperty("spark.stage.anycached", "true")
+        } else {
+          stage.properties.setProperty("spark.stage.anycached", "false")
+        }
       }
       taskSched.submitTasks(
         new TaskSet(tasks.toArray, stage.id, stage.newAttemptId(), stage.priority, stage.properties))
