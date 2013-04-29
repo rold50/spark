@@ -244,7 +244,7 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
                       taskSetIds(i) += manager.taskSet.id
                       availableCpus(i) -= 1
                       pool.numRunningTasks += 1
-                      if(manager.taskSet.properties != null && manager.taskSet.properties.getProperty("spark.stage.anycached") == true) {
+                      if(manager.taskSet.properties != null && manager.taskSet.properties.getProperty("spark.stage.anycached") == "true") {
                         pool.numRunningTasksUsingCache += 1
                       }
                       launchedTask = true
@@ -276,6 +276,7 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
   }
   
   val logFile = System.getProperty("spark.fairscheduler.fairness.logfile","unspecified")
+  val logInterval = System.getProperty("spark.fairscheduler.fairness.loginterval","1000").toLong
   
   startLogging()
   
@@ -287,7 +288,8 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
           val writer = new PrintWriter(new FileOutputStream(file), true)
           writer.print("time")
           val file_mem = new File(logFile+"-MEMORY")
-          val writer_mem = new PrintWriter(new FileOutputStream(file_mem), true)          
+          val writer_mem = new PrintWriter(new FileOutputStream(file_mem), true)
+          writer_mem.print("time")
           for(name <- poolNames) {
             writer.print(","+name)
             writer_mem.print(","+name)
@@ -304,7 +306,7 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
             }
             writer.println
             writer_mem.println
-            Thread.sleep(1000)
+            Thread.sleep(logInterval)
           }          
         }
       })

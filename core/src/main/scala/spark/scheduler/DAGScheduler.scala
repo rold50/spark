@@ -428,6 +428,26 @@ class DAGScheduler(
       }
     }
   }
+  
+  private def isCached(rdd: RDD[_]): Boolean = {
+    // If the partition is cached, return the cache locations
+    if (cacheLocs.contains(rdd.id)) {
+      return true
+    }
+
+    // If the RDD has narrow dependencies, pick the first RDD of the first narrow dep
+    // that has any placement preferences. Ideally we would choose based on transfer sizes,
+    // but this will do for now.
+    rdd.dependencies.foreach(_ match {
+      case n: NarrowDependency[_] =>
+        if(isCached(n.rdd)) {
+          return true
+        }
+      case _ =>
+    })
+    return false
+  }
+  
 
   /** Called when stage's parents are available and we can now do its task. */
   private def submitMissingTasks(stage: Stage) {
@@ -437,14 +457,12 @@ class DAGScheduler(
     myPending.clear()
     var tasks = ArrayBuffer[Task[_]]()
     //Keep track whether any stage is using a cached RDD
-    var isAnyCached = false
+    val isAnyCached = isCached(stage.rdd)
+
     if (stage.isShuffleMap) {
-      for (p <- 0 until stage.numPartitions if stage.outputLocs(p) == Nil) {
+      for (p <- 0 until stage.numPartitions if stage.outputLocs(p) == Nil) {      
         val locs = getPreferredLocs(stage.rdd, p)
         tasks += new ShuffleMapTask(stage.id, stage.rdd, stage.shuffleDep.get, p, locs)
-        if(getCacheLocs(stage.rdd)(p) != Nil) {
-          isAnyCached = true
-        }
       }
     } else {
       // This is a final stage; figure out its job's missing partitions
@@ -453,9 +471,6 @@ class DAGScheduler(
         val partition = job.partitions(id)
         val locs = getPreferredLocs(stage.rdd, partition)
         tasks += new ResultTask(stage.id, stage.rdd, job.func, partition, locs, id)
-        if(getCacheLocs(stage.rdd)(partition) != Nil) {
-          isAnyCached = true
-        }
       }
     }
     if (tasks.size > 0) {
