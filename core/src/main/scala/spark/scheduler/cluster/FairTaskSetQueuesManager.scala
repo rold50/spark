@@ -206,18 +206,24 @@ private[spark] class FairTaskSetQueuesManager extends TaskSetQueuesManager with 
    * The algorithm is as follows: we sort by the pool's running tasks to weight ratio
    * (pools number running tast / pool's weight)
    */
-  def poolFairCompFn(pool1: Pool, pool2: Pool): Boolean = {    
-    val tasksToWeightRatio1 = if (!pool1.isDisabled){ pool1.numRunningTasks.toDouble / pool1.weight.toDouble } else { Double.MaxValue } 
-    val tasksToWeightRatio2 = if (!pool2.isDisabled){ pool2.numRunningTasks.toDouble / pool2.weight.toDouble } else { Double.MaxValue }
-    var res = Math.signum(tasksToWeightRatio1 - tasksToWeightRatio2)
-    if (res == 0) {
-      //Jobs are tied in fairness ratio. We break the tie by name
-      res = pool1.name.compareTo(pool2.name)
-    }
-    if (res < 0)
-      return true
-    else
+  def poolFairCompFn(pool1: Pool, pool2: Pool): Boolean = {
+    if(pool1.isDisabled && !pool2.isDisabled) { //Not disabled gets priority (pool 2)
       return false
+    } else if(!pool1.isDisabled && pool2.isDisabled) { //Not Disabled gets priority (pool 1)
+      return true
+    } else { //If both are the same then we compare both using their tasks to weight ratio
+      val tasksToWeightRatio1 = pool1.numRunningTasks.toDouble / pool1.weight.toDouble 
+      val tasksToWeightRatio2 = pool2.numRunningTasks.toDouble / pool2.weight.toDouble
+      var res = Math.signum(tasksToWeightRatio1 - tasksToWeightRatio2)
+      if (res == 0) {
+        //Jobs are tied in fairness ratio. We break the tie by name
+        res = pool1.name.compareTo(pool2.name)
+      }
+      if (res < 0)
+        return true
+      else
+        return false
+    }    
   }
   
   override def receiveOffer(tasks: Seq[ArrayBuffer[TaskDescription]], offers: Seq[WorkerOffer]): Seq[Seq[String]] = {

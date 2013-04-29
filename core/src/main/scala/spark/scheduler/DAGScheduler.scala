@@ -428,11 +428,16 @@ class DAGScheduler(
       }
     }
   }
-  
+
+  /**
+   * Called to check whether an RDD is already in cache
+   */
   private def isCached(rdd: RDD[_]): Boolean = {
-    // If the partition is cached, return the cache locations
     if (cacheLocs.contains(rdd.id)) {
-      return true
+      val cached = cacheLocs(rdd.id)(0)
+      if(cached != Nil) {
+        return true
+      }
     }
 
     // If the RDD has narrow dependencies, pick the first RDD of the first narrow dep
